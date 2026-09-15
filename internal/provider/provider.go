@@ -25,10 +25,18 @@ const (
 
 // devcontainerBuilderProvider configures one devcontainer-builder service
 // instance; every resource under it targets that same instance.
-type devcontainerBuilderProvider struct{}
+type devcontainerBuilderProvider struct {
+	// Set via New's closure from main.go's ldflags-injected build version
+	// (see .goreleaser.yml) - "dev" for a plain `go build`. Surfaced in
+	// Metadata below so `terraform version` and crash reports show a real
+	// version instead of always "dev".
+	version string
+}
 
-func New() provider.Provider {
-	return &devcontainerBuilderProvider{}
+func New(version string) func() provider.Provider {
+	return func() provider.Provider {
+		return &devcontainerBuilderProvider{version: version}
+	}
 }
 
 type providerModel struct {
@@ -38,6 +46,7 @@ type providerModel struct {
 
 func (p *devcontainerBuilderProvider) Metadata(ctx context.Context, req provider.MetadataRequest, resp *provider.MetadataResponse) {
 	resp.TypeName = "devcontainerbuilder"
+	resp.Version = p.version
 }
 
 func (p *devcontainerBuilderProvider) Schema(ctx context.Context, req provider.SchemaRequest, resp *provider.SchemaResponse) {
