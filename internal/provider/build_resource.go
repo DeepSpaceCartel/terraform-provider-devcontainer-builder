@@ -188,6 +188,23 @@ func (r *buildResource) Configure(ctx context.Context, req resource.ConfigureReq
 // withRegistryAuthEnv), so a mismatch silently means the actual push target
 // gets no matching credentials.
 func (r *buildResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	// req.Config.Get decodes straight into buildResourceModel's plain Go
+	// types.String/*struct fields, which can't represent an unknown value -
+	// it errors (not just warns) if any attribute anywhere in the config
+	// isn't fully known yet. That's routine, not a real problem: Terraform
+	// calls ValidateConfig before the full plan graph resolves, so a
+	// perfectly ordinary config-time expression - e.g. a conditional
+	// assigning either a real object or `null` to an optional nested
+	// attribute like git_credentials, exactly what a template choosing
+	// whether to set credentials at all looks like - can still be unknown
+	// at this stage even though it's fully known by the time Create/Update
+	// actually run. This check is a soft cross-field warning, not a
+	// correctness gate, so skip it rather than surfacing a confusing
+	// provider-internals error for a config that's entirely valid.
+	if !req.Config.Raw.IsFullyKnown() {
+		return
+	}
+
 	var config buildResourceModel
 	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
 	if resp.Diagnostics.HasError() {
