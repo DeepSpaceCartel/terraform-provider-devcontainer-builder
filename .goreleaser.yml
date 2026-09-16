@@ -47,9 +47,19 @@ checksum:
   algorithm: sha256
 
 signs:
+  # --pinentry-mode loopback + an explicit (empty) --passphrase: without
+  # this, gpg tries to spawn an interactive pinentry prompt to unlock the
+  # key - even for a passphrase-less one - and fails with "Inappropriate
+  # ioctl for device" since the CI runner has no terminal for it. crazy-max/
+  # ghaction-import-gpg already enables allow-loopback-pinentry in
+  # gpg-agent.conf; this is what actually tells gpg to use it.
   - artifacts: checksum
     args:
       - "--batch"
+      - "--pinentry-mode"
+      - "loopback"
+      - "--passphrase"
+      - ""
       - "--local-user"
       - "{{ .Env.GPG_FINGERPRINT }}"
       - "--output"
