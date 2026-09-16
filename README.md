@@ -45,22 +45,28 @@ wants plan-time safety and can install one.
 
 ## Status
 
-Unpublished. Local-only via Terraform's `dev_overrides`, no registry
-publication yet. Every resource attribute forces replacement on change -
-the service has no partial-update API, so any input change means a
-brand-new build.
+Release infrastructure is in place (`.goreleaser.yml`, GPG-signed builds via
+`.github/workflows/release.yaml`, `terraform-registry-manifest.json`,
+generated docs via `tfplugindocs`) but the provider itself hasn't been
+linked to registry.terraform.io yet - until that one-time manual step
+happens (via HashiCorp's GitHub App flow, after the first signed tag),
+`dev_overrides` below is still the only way to actually use it. Every
+resource attribute forces replacement on change - the service has no
+partial-update API, so any input change means a brand-new build.
 
-If this is ever published, its registry address will be
-`deepspacecartel/devcontainer-builder` - the address's name segment is the
-suffix after `terraform-provider-`, not the repo's full name, per
+Once linked, its registry address is `deepspacecartel/devcontainer-builder`
+- the address's name segment is the suffix after `terraform-provider-`, not
+the repo's full name, per
 [HashiCorp's publishing docs](https://developer.hashicorp.com/terraform/registry/providers/publishing).
 The resource type prefix (`devcontainerbuilder_build`) is independent of
-that address and doesn't need to match it.
+that address and doesn't need to match it. See `examples/registry/main.tf`
+for what real (non-`dev_overrides`) usage looks like once it's live.
 
 ## Local dev workflow
 
-**Prerequisite**: Go >= 1.22 (`devcontainer-builder/install.sh` can bootstrap
-this if you don't have it).
+**Prerequisite**: Go >= 1.25 (`terraform-plugin-framework`'s own `go.mod`
+requires it; `devcontainer-builder/install.sh`'s pinned version needs
+bumping to match if you use it to bootstrap Go).
 
 ```bash
 go build -o "$(go env GOPATH)/bin/terraform-provider-devcontainer-builder" .
@@ -90,13 +96,30 @@ cd ../devcontainer-builder/service && npm install && npm run build && BUILDKIT_E
 # or: kubectl port-forward svc/devcontainer-builder 8080:8080
 ```
 
+## Release process
+
+A `vX.Y.Z` tag on `main` triggers `.github/workflows/release.yaml`, which
+runs GoReleaser (`.goreleaser.yml`) to cross-compile, checksum, and
+GPG-sign binaries for the OS/arch matrix the Terraform Registry expects,
+then cuts a GitHub Release with those artifacts plus
+`terraform-registry-manifest.json`. Requires `GPG_PRIVATE_KEY`/
+`GPG_PASSPHRASE` repo secrets (the key registered with the provider's
+HashiCorp Registry account once linked).
+
+Generated docs (`docs/`) come from `go generate ./...`
+([`tfplugindocs`](https://github.com/hashicorp/terraform-plugin-docs),
+pinned in `tools.go`) - run it after any schema/example change;
+`.github/workflows/ci.yaml`'s `docs` job fails the build if `docs/` is
+out of date.
+
 ## Non-goals for this round
 
 - No async submit+poll `/build` variant - `internal/client.Client` is an
   interface specifically so a future async implementation can be swapped in
   without changing `internal/provider/build_resource.go`'s CRUD logic, but
   none is built now.
-- No publishing to any Terraform registry.
+- Registry publication itself (the HashiCorp GitHub App linking step) isn't
+  done yet - see "Status" above for what's already built toward it.
 - No changes to `devcontainer-builder`'s own module or service beyond the
   additive `GET`/`DELETE /image` endpoints and `BuildResponse`'s
   `registry`/`name`/`tag` fields this provider depends on (already merged

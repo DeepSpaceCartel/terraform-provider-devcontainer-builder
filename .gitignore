@@ -1,3 +1,6 @@
 /terraform-provider-devcontainer-builder
 examples/local/.terraform*
 examples/local/terraform.tfstate*
+examples/registry/.terraform*
+examples/registry/terraform.tfstate*
+dist/
