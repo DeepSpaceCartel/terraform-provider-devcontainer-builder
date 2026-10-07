@@ -12,6 +12,11 @@ resource "devcontainerbuilder_build" "example" {
     name     = "example-devcontainer"
   }
 
+  # Optional - a repository can have several devcontainer.json files (the
+  # root one, id "main", and one per .devcontainer/<folder>/, id <folder>);
+  # one image is built per file. Unset builds them all. Changing it rebuilds.
+  # instances = ["main", "backend"]
+
   # Optional - only needed for a private repository. HTTPS-shaped, same as
   # the service's own /build gitCredentials. Rotating the token updates
   # state in place; it does not rebuild the image.
@@ -30,6 +35,13 @@ resource "devcontainerbuilder_build" "example" {
   # }
 }
 
+# The first image (main when the repository has a root devcontainer.json).
 output "image" {
   value = devcontainerbuilder_build.example.image
+}
+
+# Every image, keyed by id. The keys are known at plan time, so for_each
+# over images works on the first create.
+output "images" {
+  value = { for id, built in devcontainerbuilder_build.example.images : id => built.image }
 }

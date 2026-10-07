@@ -15,8 +15,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   apply afterwards adopts `repository`, `branch` and `image_spec` from
   configuration without rebuilding. Credentials can't be imported; that
   apply stores them from configuration.
+- One image per devcontainer.json on `devcontainerbuilder_build`, for a
+  devcontainer-builder service that lists them (POST /build `images`,
+  `instances` and `dryRun`). The new computed `images` maps each id (`main`
+  for the root config, else the `.devcontainer/<folder>/` name) to its
+  `config_path`, `image`, `registry`, `name` and `tag`. The new optional
+  `instances` builds only the ids given; changing it rebuilds.
+- `terraform plan` lists the images with a dry run (a shallow clone, no
+  build), so `images` has known keys on create and `for_each` over it works
+  on the first apply. An `instances` id the repository doesn't have is a
+  plan error. Apply builds exactly the planned ids.
+- With `instances` unset, every plan of an existing resource repeats the dry
+  run and rebuilds when a devcontainer.json was added or removed upstream.
+  Set `instances` to skip that clone.
 
 ### Changed
+
+- `image`, `resolved_registry`, `resolved_name` and `resolved_tag` describe
+  the first image (`main` when the repository has a root devcontainer.json).
+  Read checks, and Delete deletes, every image in `images`; any one missing
+  rebuilds them all.
+- Existing state and configurations plan no change. The next refresh records
+  the existing image as the single `main` entry of `images` (with a null
+  `config_path`); so does a build by a service that doesn't list images,
+  which never gets a dry run (it would build for real).
 
 - Changing only `git_credentials` or `registry_credentials` on
   `devcontainerbuilder_build` (for example, rotating a token) is now an

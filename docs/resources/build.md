@@ -3,12 +3,15 @@
 page_title: "devcontainerbuilder_build Resource - devcontainerbuilder"
 subcategory: ""
 description: |-
-  Triggers a devcontainer-builder build (clone + devcontainer build + push) via POST /build. Changing repository, branch or image_spec rebuilds the image (replacement) - the service has no partial-update API. Changing only git_credentials or registry_credentials (e.g. rotating a token) updates them in state in place, without a rebuild. Read checks the built image still exists in its registry (GET /image); Delete attempts to remove it (DELETE /image), best-effort, since not all registries support deletion. Importable by image reference (see the Import section).
+  Triggers a devcontainer-builder build (clone + devcontainer build + push) via POST /build. Changing repository, branch, image_spec or instances rebuilds the image (replacement) - the service has no partial-update API. Changing only git_credentials or registry_credentials (e.g. rotating a token) updates them in state in place, without a rebuild. Read checks the built image still exists in its registry (GET /image); Delete attempts to remove it (DELETE /image), best-effort, since not all registries support deletion. Importable by image reference (see the Import section).
+  A repository can have several devcontainer.json files - the root one and one per .devcontainer/<folder>/ - and the service builds one image per file. images lists them all, keyed by id; the singular attributes (image, resolved_*) describe the first one. The plan lists them with a dry run (a shallow clone, no build), so for_each over images works on the first create.
 ---
 
 # devcontainerbuilder_build (Resource)
 
-Triggers a devcontainer-builder build (clone + devcontainer build + push) via POST /build. Changing repository, branch or image_spec rebuilds the image (replacement) - the service has no partial-update API. Changing only git_credentials or registry_credentials (e.g. rotating a token) updates them in state in place, without a rebuild. Read checks the built image still exists in its registry (GET /image); Delete attempts to remove it (DELETE /image), best-effort, since not all registries support deletion. Importable by image reference (see the Import section).
+Triggers a devcontainer-builder build (clone + devcontainer build + push) via POST /build. Changing repository, branch, image_spec or instances rebuilds the image (replacement) - the service has no partial-update API. Changing only git_credentials or registry_credentials (e.g. rotating a token) updates them in state in place, without a rebuild. Read checks the built image still exists in its registry (GET /image); Delete attempts to remove it (DELETE /image), best-effort, since not all registries support deletion. Importable by image reference (see the Import section).
+
+A repository can have several devcontainer.json files - the root one and one per `.devcontainer/<folder>/` - and the service builds one image per file. `images` lists them all, keyed by id; the singular attributes (`image`, `resolved_*`) describe the first one. The plan lists them with a dry run (a shallow clone, no build), so `for_each` over `images` works on the first create.
 
 ## Example Usage
 
@@ -26,6 +29,11 @@ resource "devcontainerbuilder_build" "example" {
     registry = "ghcr.io/example"
     name     = "example-devcontainer"
   }
+
+  # Optional - a repository can have several devcontainer.json files (the
+  # root one, id "main", and one per .devcontainer/<folder>/, id <folder>);
+  # one image is built per file. Unset builds them all. Changing it rebuilds.
+  # instances = ["main", "backend"]
 
   # Optional - only needed for a private repository. HTTPS-shaped, same as
   # the service's own /build gitCredentials. Rotating the token updates
@@ -45,8 +53,15 @@ resource "devcontainerbuilder_build" "example" {
   # }
 }
 
+# The first image (main when the repository has a root devcontainer.json).
 output "image" {
   value = devcontainerbuilder_build.example.image
+}
+
+# Every image, keyed by id. The keys are known at plan time, so for_each
+# over images works on the first create.
+output "images" {
+  value = { for id, built in devcontainerbuilder_build.example.images : id => built.image }
 }
 ```
 
@@ -62,13 +77,15 @@ output "image" {
 - `branch` (String) Branch to build. If unset, the service builds the repository's default branch and this attribute reports the branch it resolved (devcontainer-builder services that don't report one build "main"). Changing it rebuilds the image; so does removing an explicitly set branch, since the default branch may differ. Leaving it unset never rebuilds on its own - a later change of the repository's default branch is not detected.
 - `git_credentials` (Attributes, Sensitive) HTTPS git credentials for a private repository. Changing them (e.g. rotating the token) only updates state - it does not rebuild the image; the new values are used by the next rebuild. (see [below for nested schema](#nestedatt--git_credentials))
 - `image_spec` (Attributes) Target image overrides. Any field left unset is derived by the service (name from the repo path, tag from the commit SHA, registry from server-side mapping rules). (see [below for nested schema](#nestedatt--image_spec))
+- `instances` (Set of String) Build only these devcontainer.json files, by id: `main` for the root one (`.devcontainer/devcontainer.json`, else `.devcontainer.json`), else the `.devcontainer/<folder>/` folder name lower-cased, with characters outside `[a-z0-9-]` replaced by `-`. Unset builds every one found, and every plan then lists them again (a shallow clone) to rebuild when one is added or removed; set, that check is skipped. An id the repository doesn't have is a plan error. Must not be empty. Changing it rebuilds the image. Needs a devcontainer-builder service that lists images.
 - `registry_credentials` (Attributes, Sensitive) Credentials used to push the built image, and reused for the Read/Delete registry calls this resource makes later. Changing them (e.g. rotating the password) only updates state - it does not rebuild the image; later Read/Delete calls and the next rebuild use the new values. (see [below for nested schema](#nestedatt--registry_credentials))
 
 ### Read-Only
 
 - `commit` (String) Full SHA of the commit the image was built from - check it out to get the working copy that matches the image. Null when built by a devcontainer-builder older than v0.3.0.
 - `id` (String) Same value as image - the service has no separate build-ID concept.
-- `image` (String) The built and pushed image reference, e.g. ghcr.io/org/repo:sha-abc1234.
+- `image` (String) The built and pushed image reference, e.g. ghcr.io/org/repo:sha-abc1234. With several images, the first one's: `main` when the repository has a root devcontainer.json (and `instances` includes it), else the first by id.
+- `images` (Attributes Map) Every image built, keyed by id (see `instances`): one per devcontainer.json. Planned from a dry run, so its keys, `config_path`, `registry` and `name` are known at plan time on create; `tag` and `image` too when `image_spec.tag` is set (otherwise they come from the commit built). From a devcontainer-builder service that doesn't list images, an earlier version of this provider, or an import: a single `main` entry with a null `config_path`, known after apply. (see [below for nested schema](#nestedatt--images))
 - `resolved_name` (String) The image name actually used (from the /build response).
 - `resolved_registry` (String) The registry the image was actually pushed to (from the /build response), used for the Read/Delete registry calls.
 - `resolved_tag` (String) The image tag actually used (from the /build response).
@@ -100,6 +117,18 @@ Required:
 - `password` (String, Sensitive)
 - `registry` (String)
 - `username` (String, Sensitive)
+
+
+<a id="nestedatt--images"></a>
+### Nested Schema for `images`
+
+Read-Only:
+
+- `config_path` (String) The devcontainer.json the image is built from, relative to the repository root. Null when not reported.
+- `image` (String) The pushed image reference, `<registry>/<name>:<tag>`.
+- `name` (String) The image name: `main`'s is `image_spec.name` or the derived default; any other entry's is that name with `-<id>` appended.
+- `registry` (String)
+- `tag` (String) The same for every entry.
 
 ## Import
 

@@ -3,7 +3,10 @@
 // here mirror service/src/types.ts exactly.
 package client
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"errors"
+)
 
 // ImageTarget mirrors service/src/types.ts's ImageTarget.
 type ImageTarget struct {
@@ -34,7 +37,31 @@ type BuildRequest struct {
 	Image               *ImageTarget         `json:"image,omitempty"`
 	GitCredentials      *GitCredentials      `json:"gitCredentials,omitempty"`
 	RegistryCredentials *RegistryCredentials `json:"registryCredentials,omitempty"`
+	// Instances builds only these items of the repository's images list,
+	// by id (service ADR-0016). Nil means every devcontainer.json found;
+	// the service rejects an empty list.
+	Instances []string `json:"instances,omitempty"`
+	// DryRun resolves the images list without building anything. HTTPClient
+	// refuses to send it to a service that doesn't support it (which would
+	// ignore the field and really build), returning ErrDryRunUnsupported.
+	DryRun bool `json:"dryRun,omitempty"`
 }
+
+// BuildImage mirrors one item of the POST /build response's images list
+// (service ADR-0016): one image per devcontainer.json.
+type BuildImage struct {
+	ID              string `json:"id"`
+	ConfigPath      string `json:"configPath"`
+	Image           string `json:"image"`
+	Registry        string `json:"registry"`
+	Name            string `json:"name"`
+	Tag             string `json:"tag"`
+	ImageBuildLogID string `json:"imageBuildLogId,omitempty"`
+}
+
+// ErrDryRunUnsupported is returned by Build for a DryRun request when the
+// service doesn't support dry runs (it predates the images list).
+var ErrDryRunUnsupported = errors.New("the devcontainer-builder service does not support dry runs (POST /build dryRun) - it predates one image per devcontainer.json")
 
 // BuildResult mirrors service/src/types.ts's BuildResponse (renamed here to
 // avoid confusion with Go's http.Response).
@@ -50,6 +77,10 @@ type BuildResult struct {
 	// branch when the request named none. Empty from services that don't
 	// report it (they always build the requested branch, or "main").
 	Branch string `json:"branch,omitempty"`
+	// Images lists every image built (or, for a dry run, that would be
+	// built), main first; the fields above describe Images[0]. Empty from
+	// services that predate it.
+	Images []BuildImage `json:"images,omitempty"`
 }
 
 // ImageRef identifies a previously-built image for CheckImage/DeleteImage.

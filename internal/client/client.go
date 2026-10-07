@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 )
 
 // Client is the seam between resource CRUD logic and how a build actually
@@ -28,6 +29,12 @@ type Client interface {
 type HTTPClient struct {
 	Endpoint   string
 	HTTPClient *http.Client
+
+	// dryRun caches whether the service supports POST /build's dryRun
+	// (probed once, see supportsDryRun).
+	dryRunMu      sync.Mutex
+	dryRunProbed  bool
+	dryRunSupport bool
 }
 
 func NewHTTPClient(endpoint string, httpClient *http.Client) *HTTPClient {
@@ -35,6 +42,18 @@ func NewHTTPClient(endpoint string, httpClient *http.Client) *HTTPClient {
 }
 
 func (c *HTTPClient) Build(ctx context.Context, req BuildRequest) (BuildResult, error) {
+	if req.DryRun {
+		// A service without dryRun tolerates the unknown field and runs a
+		// real build and push - never send it one.
+		supported, err := c.supportsDryRun(ctx)
+		if err != nil {
+			return BuildResult{}, err
+		}
+		if !supported {
+			return BuildResult{}, ErrDryRunUnsupported
+		}
+	}
+
 	body, err := json.Marshal(req)
 	if err != nil {
 		return BuildResult{}, fmt.Errorf("marshal build request: %w", err)
@@ -70,6 +89,54 @@ func (c *HTTPClient) Build(ctx context.Context, req BuildRequest) (BuildResult, 
 		return BuildResult{}, &RequestError{StatusCode: res.StatusCode, Message: message}
 	}
 	return BuildResult{}, &BuildFailureError{StatusCode: res.StatusCode, Message: message}
+}
+
+// supportsDryRun reports whether POST /build accepts dryRun, from the
+// service's own generated OpenAPI document (GET /documentation/json, served
+// since v0.1.5): the request body schema lists dryRun from the release that
+// added it (with the images list). A missing document or field means no.
+// The answer is cached; a failed request is not.
+func (c *HTTPClient) supportsDryRun(ctx context.Context) (bool, error) {
+	c.dryRunMu.Lock()
+	defer c.dryRunMu.Unlock()
+	if c.dryRunProbed {
+		return c.dryRunSupport, nil
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, c.Endpoint+"/documentation/json", nil)
+	if err != nil {
+		return false, fmt.Errorf("openapi document request: %w", err)
+	}
+	res, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		return false, fmt.Errorf("calling %s/documentation/json: %w", c.Endpoint, err)
+	}
+	defer res.Body.Close()
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return false, fmt.Errorf("reading /documentation/json response: %w", err)
+	}
+	if res.StatusCode >= 500 {
+		return false, fmt.Errorf("GET %s/documentation/json: %s", c.Endpoint, errorMessage(body))
+	}
+
+	var doc struct {
+		Paths map[string]map[string]struct {
+			RequestBody struct {
+				Content map[string]struct {
+					Schema struct {
+						Properties map[string]json.RawMessage `json:"properties"`
+					} `json:"schema"`
+				} `json:"content"`
+			} `json:"requestBody"`
+		} `json:"paths"`
+	}
+	supported := false
+	if res.StatusCode == http.StatusOK && json.Unmarshal(body, &doc) == nil {
+		_, supported = doc.Paths["/build"]["post"].RequestBody.Content["application/json"].Schema.Properties["dryRun"]
+	}
+	c.dryRunProbed, c.dryRunSupport = true, supported
+	return supported, nil
 }
 
 func (c *HTTPClient) CheckImage(ctx context.Context, ref ImageRef, auth *RegistryAuth) (bool, error) {

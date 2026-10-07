@@ -26,10 +26,18 @@ type fakeService struct {
 	// services don't report it and always build "main").
 	defaultBranch string
 	reportBranch  bool
+	// configs are the repository's devcontainer.json files, as the service
+	// lists them (main first, then by id).
+	configs []fakeConfig
+	// legacy is a service that predates the images list: no images in the
+	// response, no dryRun in its OpenAPI document - and a dryRun request
+	// really builds, since it ignores unknown fields.
+	legacy bool
 
 	mu        sync.Mutex
 	images    map[string]bool // registry/name:tag -> exists
 	builds    []client.BuildRequest
+	dryRuns   []client.BuildRequest
 	deletes   int
 	imageAuth []string // X-Registry-Password of every GET/DELETE /image
 	server    *httptest.Server
@@ -37,7 +45,10 @@ type fakeService struct {
 
 func newFakeService(t *testing.T) *fakeService {
 	t.Helper()
-	f := &fakeService{t: t, defaultBranch: "trunk", reportBranch: true, images: map[string]bool{}}
+	f := &fakeService{
+		t: t, defaultBranch: "trunk", reportBranch: true, images: map[string]bool{},
+		configs: []fakeConfig{{id: "main", path: ".devcontainer/devcontainer.json"}},
+	}
 	f.server = httptest.NewServer(http.HandlerFunc(f.handle))
 	t.Cleanup(f.server.Close)
 	return f
@@ -57,7 +68,36 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":"bad json"}`, http.StatusBadRequest)
 			return
 		}
-		f.builds = append(f.builds, req)
+		dryRun := req.DryRun && !f.legacy
+		if dryRun {
+			f.dryRuns = append(f.dryRuns, req)
+		} else {
+			f.builds = append(f.builds, req)
+		}
+		selected := f.configs
+		if req.Instances != nil && !f.legacy {
+			selected = nil
+			known := map[string]bool{}
+			for _, id := range req.Instances {
+				known[id] = true
+			}
+			var ids []string
+			for _, c := range f.configs {
+				ids = append(ids, fmt.Sprintf("%q", c.id))
+				if known[c.id] {
+					selected = append(selected, c)
+					delete(known, c.id)
+				}
+			}
+			if len(known) > 0 {
+				w.WriteHeader(http.StatusBadRequest)
+				writeJSON(w, map[string]string{"error": fmt.Sprintf("unknown instance id(s) %v - this repository has: %s", req.Instances, strings.Join(ids, ", "))})
+				return
+			}
+		}
+		if f.legacy {
+			selected = f.configs[:1]
+		}
 		branch := f.defaultBranch
 		if !f.reportBranch {
 			branch = "main"
@@ -66,7 +106,12 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 			branch = *req.Branch
 		}
 		registry, name := "registry.example/org", "app"
-		tag := fmt.Sprintf("sha-%07d", len(f.builds))
+		// HEAD moves with every build; a dry run sees the next one's.
+		commitN := len(f.builds)
+		if dryRun {
+			commitN++
+		}
+		tag := fmt.Sprintf("sha-%07d", commitN)
 		if req.Image != nil {
 			if req.Image.Registry != nil {
 				registry = *req.Image.Registry
@@ -78,13 +123,33 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 				tag = *req.Image.Tag
 			}
 		}
-		image := registry + "/" + name + ":" + tag
-		f.images[image] = true
-		res := map[string]string{"image": image, "registry": registry, "name": name, "tag": tag, "commit": strings.Repeat("a", 40)}
+		var images []map[string]string
+		for _, c := range selected {
+			n := name
+			if c.id != "main" {
+				n = name + "-" + c.id
+			}
+			image := registry + "/" + n + ":" + tag
+			if !dryRun {
+				f.images[image] = true
+			}
+			images = append(images, map[string]string{"id": c.id, "configPath": c.path, "image": image, "registry": registry, "name": n, "tag": tag})
+		}
+		first := images[0]
+		res := map[string]any{"image": first["image"], "registry": registry, "name": first["name"], "tag": tag, "commit": strings.Repeat("a", 40)}
+		if !f.legacy {
+			res["images"] = images
+		}
 		if f.reportBranch {
 			res["branch"] = branch
 		}
 		writeJSON(w, res)
+	case r.Method == http.MethodGet && r.URL.Path == "/documentation/json" && !f.legacy:
+		writeJSON(w, map[string]any{"paths": map[string]any{"/build": map[string]any{"post": map[string]any{"requestBody": map[string]any{
+			"content": map[string]any{"application/json": map[string]any{"schema": map[string]any{"properties": map[string]any{
+				"repository": map[string]any{}, "instances": map[string]any{}, "dryRun": map[string]any{},
+			}}}},
+		}}}}})
 	case r.Method == http.MethodGet && r.URL.Path == "/image":
 		f.imageAuth = append(f.imageAuth, r.Header.Get("X-Registry-Password"))
 		writeJSON(w, map[string]any{"image": ref, "exists": f.images[ref]})
@@ -114,6 +179,8 @@ func (f *fakeService) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+type fakeConfig struct{ id, path string }
+
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
@@ -129,6 +196,30 @@ func (f *fakeService) lastBuild() client.BuildRequest {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.builds[len(f.builds)-1]
+}
+
+func (f *fakeService) dryRunCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.dryRuns)
+}
+
+func (f *fakeService) lastDryRun() client.BuildRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.dryRuns[len(f.dryRuns)-1]
+}
+
+func (f *fakeService) setConfigs(configs ...fakeConfig) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.configs = configs
+}
+
+func (f *fakeService) hasImage(ref string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.images[ref]
 }
 
 func (f *fakeService) lastImageAuth() string {

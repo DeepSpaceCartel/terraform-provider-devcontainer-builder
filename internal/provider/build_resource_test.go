@@ -266,6 +266,8 @@ func TestBuildResource_Import(t *testing.T) {
 				ImportStateVerify: true,
 				ImportStateVerifyIgnore: []string{
 					"repository", "branch", "image_spec", "git_credentials", "registry_credentials", "commit",
+					// Not reported by an image reference.
+					"images.main.config_path",
 				},
 			},
 			{

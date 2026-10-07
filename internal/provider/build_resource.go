@@ -10,6 +10,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/mapplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -50,6 +51,8 @@ type buildResourceModel struct {
 	ImageSpec           *imageSpecModel           `tfsdk:"image_spec"`
 	GitCredentials      *gitCredentialsModel      `tfsdk:"git_credentials"`
 	RegistryCredentials *registryCredentialsModel `tfsdk:"registry_credentials"`
+	Instances           types.Set                 `tfsdk:"instances"`
+	Images              types.Map                 `tfsdk:"images"`
 	ID                  types.String              `tfsdk:"id"`
 	Image               types.String              `tfsdk:"image"`
 	ResolvedRegistry    types.String              `tfsdk:"resolved_registry"`
@@ -65,11 +68,16 @@ func (r *buildResource) Metadata(ctx context.Context, req resource.MetadataReque
 func (r *buildResource) Schema(ctx context.Context, req resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		Description: "Triggers a devcontainer-builder build (clone + devcontainer build + push) via POST /build. " +
-			"Changing repository, branch or image_spec rebuilds the image (replacement) - the service has no " +
+			"Changing repository, branch, image_spec or instances rebuilds the image (replacement) - the service has no " +
 			"partial-update API. Changing only git_credentials or registry_credentials (e.g. rotating a token) " +
 			"updates them in state in place, without a rebuild. Read checks the built image still exists in its " +
 			"registry (GET /image); Delete attempts to remove it (DELETE /image), best-effort, since not all " +
-			"registries support deletion. Importable by image reference (see the Import section).",
+			"registries support deletion. Importable by image reference (see the Import section).\n\n" +
+			"A repository can have several devcontainer.json files - the root one and one per " +
+			"`.devcontainer/<folder>/` - and the service builds one image per file. `images` lists them all, " +
+			"keyed by id; the singular attributes (`image`, `resolved_*`) describe the first one. The plan " +
+			"lists them with a dry run (a shallow clone, no build), so `for_each` over `images` works on the " +
+			"first create.",
 		Attributes: map[string]schema.Attribute{
 			"repository": schema.StringAttribute{
 				Required:    true,
@@ -147,6 +155,53 @@ func (r *buildResource) Schema(ctx context.Context, req resource.SchemaRequest, 
 					},
 				},
 			},
+			"instances": schema.SetAttribute{
+				ElementType: types.StringType,
+				Optional:    true,
+				Description: "Build only these devcontainer.json files, by id: `main` for the root one " +
+					"(`.devcontainer/devcontainer.json`, else `.devcontainer.json`), else the `.devcontainer/<folder>/` " +
+					"folder name lower-cased, with characters outside `[a-z0-9-]` replaced by `-`. Unset builds every " +
+					"one found, and every plan then lists them again (a shallow clone) to rebuild when one is added or " +
+					"removed; set, that check is skipped. An id the repository doesn't have is a plan error. Must not " +
+					"be empty. Changing it rebuilds the image. Needs a devcontainer-builder service that lists images.",
+				PlanModifiers: []planmodifier.Set{
+					setRequiresReplaceUnlessImported(),
+				},
+			},
+			"images": schema.MapNestedAttribute{
+				Computed: true,
+				Description: "Every image built, keyed by id (see `instances`): one per devcontainer.json. Planned " +
+					"from a dry run, so its keys, `config_path`, `registry` and `name` are known at plan time on " +
+					"create; `tag` and `image` too when `image_spec.tag` is set (otherwise they come from the commit " +
+					"built). From a devcontainer-builder service that doesn't list images, an earlier version of this " +
+					"provider, or an import: a single `main` entry with a null `config_path`, known after apply.",
+				NestedObject: schema.NestedAttributeObject{
+					Attributes: map[string]schema.Attribute{
+						"config_path": schema.StringAttribute{
+							Computed:    true,
+							Description: "The devcontainer.json the image is built from, relative to the repository root. Null when not reported.",
+						},
+						"image": schema.StringAttribute{
+							Computed:    true,
+							Description: "The pushed image reference, `<registry>/<name>:<tag>`.",
+						},
+						"registry": schema.StringAttribute{
+							Computed: true,
+						},
+						"name": schema.StringAttribute{
+							Computed:    true,
+							Description: "The image name: `main`'s is `image_spec.name` or the derived default; any other entry's is that name with `-<id>` appended.",
+						},
+						"tag": schema.StringAttribute{
+							Computed:    true,
+							Description: "The same for every entry.",
+						},
+					},
+				},
+				PlanModifiers: []planmodifier.Map{
+					mapplanmodifier.UseStateForUnknown(),
+				},
+			},
 			"id": schema.StringAttribute{
 				Computed: true,
 				PlanModifiers: []planmodifier.String{
@@ -159,7 +214,7 @@ func (r *buildResource) Schema(ctx context.Context, req resource.SchemaRequest, 
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.UseStateForUnknown(),
 				},
-				Description: "The built and pushed image reference, e.g. ghcr.io/org/repo:sha-abc1234.",
+				Description: "The built and pushed image reference, e.g. ghcr.io/org/repo:sha-abc1234. With several images, the first one's: `main` when the repository has a root devcontainer.json (and `instances` includes it), else the first by id.",
 			},
 			"resolved_registry": schema.StringAttribute{
 				Computed: true,
@@ -225,6 +280,20 @@ func (r *buildResource) ValidateConfig(ctx context.Context, req resource.Validat
 	// actually run. This check is a soft cross-field warning, not a
 	// correctness gate, so skip it rather than surfacing a confusing
 	// provider-internals error for a config that's entirely valid.
+	var instances types.Set
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("instances"), &instances)...)
+	if !instances.IsNull() && !instances.IsUnknown() {
+		if len(instances.Elements()) == 0 {
+			resp.Diagnostics.AddAttributeError(path.Root("instances"), "instances must not be empty",
+				"Leave instances unset to build every devcontainer.json the repository has.")
+		}
+		for _, e := range instances.Elements() {
+			if v, ok := e.(types.String); ok && !v.IsUnknown() && (v.IsNull() || v.ValueString() == "") {
+				resp.Diagnostics.AddAttributeError(path.Root("instances"), "instances must not contain an empty id", "")
+			}
+		}
+	}
+
 	if !req.Config.Raw.IsFullyKnown() {
 		return
 	}
@@ -297,6 +366,10 @@ func (r *buildResource) buildRequest(model buildResourceModel) client.BuildReque
 		}
 	}
 
+	if instances, _ := setStrings(context.Background(), model.Instances); instances != nil {
+		req.Instances = instances // ValidateConfig rejects an empty set
+	}
+
 	return req
 }
 
@@ -309,11 +382,31 @@ func (r *buildResource) doBuild(ctx context.Context, model buildResourceModel) (
 	ctx, cancel := context.WithTimeout(ctx, r.requestTimeout)
 	defer cancel()
 
-	result, err := r.client.Build(ctx, r.buildRequest(model))
+	req := r.buildRequest(model)
+	// Build exactly what the plan listed, so a devcontainer.json pushed
+	// between plan and apply can't add an image nobody planned for.
+	if entries, d := imageEntries(ctx, model.Images); !d.HasError() && len(entries) > 0 {
+		req.Instances = sortedKeys(entries)
+	}
+	result, err := r.client.Build(ctx, req)
 	if err != nil {
 		diags.AddError("devcontainer-builder build failed", err.Error())
 		return model, diags
 	}
+
+	images, d := imagesFromResult(result)
+	diags.Append(d...)
+	if req.Instances != nil && len(result.Images) == 0 {
+		diags.AddError("instances needs a newer devcontainer-builder service",
+			"The service built the repository's one image and ignored instances: it predates one image per "+
+				"devcontainer.json. Remove instances, or upgrade the service. This resource is tainted and its "+
+				"image is deleted on the next apply.")
+	} else if mismatch := checkPlannedImages(ctx, model.Images, images); mismatch != "" {
+		diags.AddError("The repository changed between plan and apply",
+			"The images built differ from the plan's ("+mismatch+"). They are recorded and this resource is "+
+				"tainted, so the next apply replaces them; run it again.")
+	}
+	model.Images = images
 
 	model.ID = types.StringValue(result.Image)
 	model.Image = types.StringValue(result.Image)
@@ -352,10 +445,12 @@ func (r *buildResource) Create(ctx context.Context, req resource.CreateRequest, 
 
 	result, diags := r.doBuild(ctx, plan)
 	resp.Diagnostics.Append(diags...)
-	if resp.Diagnostics.HasError() {
-		return
+	if result.Image.IsUnknown() {
+		return // nothing was built
 	}
 
+	// Saved even with an error from doBuild: the images were pushed, and
+	// a tainted resource gets them deleted on the next apply.
 	resp.Diagnostics.Append(resp.State.Set(ctx, &result)...)
 	resp.Diagnostics.Append(resp.Private.SetKey(ctx, privateBranchConfigured, flagValue(!config.Branch.IsNull()))...)
 }
@@ -381,28 +476,40 @@ func (r *buildResource) Read(ctx context.Context, req resource.ReadRequest, resp
 		return
 	}
 
-	ref := client.ImageRef{
-		Registry: state.ResolvedRegistry.ValueString(),
-		Name:     state.ResolvedName.ValueString(),
-		Tag:      state.ResolvedTag.ValueString(),
+	// State from an earlier provider version, or an import, has only the
+	// singular attributes: record them as the one entry they describe.
+	if state.Images.IsNull() || len(state.Images.Elements()) == 0 {
+		images, diags := imagesFromSingular(state)
+		resp.Diagnostics.Append(diags...)
+		state.Images = images
+	}
+
+	refs, diags := trackedImages(ctx, state)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
 	}
 
 	readCtx, cancel := context.WithTimeout(ctx, r.requestTimeout)
 	defer cancel()
 
-	exists, err := r.client.CheckImage(readCtx, ref, r.credsFromState(state))
-	if err != nil {
-		// A transient registry outage must not look like "the resource was
-		// deleted" - surface it as an error so state is left untouched and
-		// the next plan/apply can retry, rather than wrongly recreating.
-		resp.Diagnostics.AddError("failed to check image existence", err.Error())
-		return
-	}
-
-	if !exists {
-		tflog.Debug(ctx, "image no longer exists in its registry, removing from state so it will be recreated", map[string]any{"image": state.Image.ValueString()})
-		resp.State.RemoveResource(ctx)
-		return
+	for _, ref := range refs {
+		exists, err := r.client.CheckImage(readCtx, ref.ref, r.credsFromState(state))
+		if err != nil {
+			// A transient registry outage must not look like "the resource
+			// was deleted" - surface it as an error so state is left
+			// untouched and the next plan/apply can retry, rather than
+			// wrongly recreating.
+			resp.Diagnostics.AddError("failed to check image existence", fmt.Sprintf("images[%q]: %s", ref.id, err))
+			return
+		}
+		if !exists {
+			// Any one missing rebuilds them all: the service builds the
+			// whole list in one request.
+			tflog.Debug(ctx, "image no longer exists in its registry, removing from state so it will be recreated", map[string]any{"id": ref.id, "image": ref.ref.Registry + "/" + ref.ref.Name + ":" + ref.ref.Tag})
+			resp.State.RemoveResource(ctx)
+			return
+		}
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
@@ -418,7 +525,7 @@ func (r *buildResource) Read(ctx context.Context, req resource.ReadRequest, resp
 // build-input change reaching Update any other way still rebuilds, as a
 // fallback for a future attribute added without RequiresReplace - such an
 // attribute must also get the computed outputs (image, resolved_*, commit,
-// id) planned as unknown, since their UseStateForUnknown would otherwise
+// id, images) planned as unknown, since their UseStateForUnknown would otherwise
 // promise Terraform the old values.
 func (r *buildResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
 	var plan, state, config buildResourceModel
@@ -451,6 +558,7 @@ func (r *buildResource) Update(ctx context.Context, req resource.UpdateRequest, 
 		result.ResolvedName = state.ResolvedName
 		result.ResolvedTag = state.ResolvedTag
 		result.Commit = state.Commit
+		result.Images = state.Images
 		if result.Branch.IsUnknown() {
 			result.Branch = state.Branch
 		}
@@ -468,6 +576,9 @@ func buildInputsChanged(plan, state buildResourceModel) bool {
 		return true
 	}
 	if !plan.Branch.IsUnknown() && !plan.Branch.Equal(state.Branch) {
+		return true
+	}
+	if !plan.Instances.Equal(state.Instances) {
 		return true
 	}
 	return !imageSpecEqual(plan.ImageSpec, state.ImageSpec)
@@ -535,26 +646,31 @@ func (r *buildResource) Delete(ctx context.Context, req resource.DeleteRequest, 
 		return
 	}
 
-	ref := client.ImageRef{
-		Registry: state.ResolvedRegistry.ValueString(),
-		Name:     state.ResolvedName.ValueString(),
-		Tag:      state.ResolvedTag.ValueString(),
+	refs, diags := trackedImages(ctx, state)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
 	}
 
 	deleteCtx, cancel := context.WithTimeout(ctx, r.requestTimeout)
 	defer cancel()
 
-	result, err := r.client.DeleteImage(deleteCtx, ref, r.credsFromState(state))
-	if err != nil {
-		resp.Diagnostics.AddError("failed to delete image", err.Error())
-		return
-	}
-
-	if !result.Deleted {
-		tflog.Warn(ctx, "registry did not delete the image; removing from Terraform state only", map[string]any{
-			"image":  state.Image.ValueString(),
-			"reason": result.Reason,
-		})
+	// Every image is attempted even when one fails, so a retry has as
+	// little left to do as possible.
+	for _, ref := range refs {
+		image := ref.ref.Registry + "/" + ref.ref.Name + ":" + ref.ref.Tag
+		result, err := r.client.DeleteImage(deleteCtx, ref.ref, r.credsFromState(state))
+		if err != nil {
+			resp.Diagnostics.AddError("failed to delete image", fmt.Sprintf("images[%q] (%s): %s", ref.id, image, err))
+			continue
+		}
+		if !result.Deleted {
+			tflog.Warn(ctx, "registry did not delete the image; removing from Terraform state only", map[string]any{
+				"id":     ref.id,
+				"image":  image,
+				"reason": result.Reason,
+			})
+		}
 	}
 }
 

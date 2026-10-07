@@ -6,6 +6,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/objectplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/setplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
@@ -60,6 +61,18 @@ func stringRequiresReplaceUnlessImported() planmodifier.String {
 func objectRequiresReplaceUnlessImported() planmodifier.Object {
 	return objectplanmodifier.RequiresReplaceIf(
 		func(ctx context.Context, req planmodifier.ObjectRequest, resp *objectplanmodifier.RequiresReplaceIfFuncResponse) {
+			imported, diags := privateFlag(ctx, req.Private, privateImported)
+			resp.Diagnostics.Append(diags...)
+			resp.RequiresReplace = !imported
+		},
+		"Changing this value rebuilds the image (except on the first apply after an import, which adopts it).",
+		"Changing this value rebuilds the image (except on the first apply after an import, which adopts it).",
+	)
+}
+
+func setRequiresReplaceUnlessImported() planmodifier.Set {
+	return setplanmodifier.RequiresReplaceIf(
+		func(ctx context.Context, req planmodifier.SetRequest, resp *setplanmodifier.RequiresReplaceIfFuncResponse) {
 			imported, diags := privateFlag(ctx, req.Private, privateImported)
 			resp.Diagnostics.Append(diags...)
 			resp.RequiresReplace = !imported

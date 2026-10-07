@@ -29,20 +29,46 @@ you `apply`, plan-time safety, and (via `GET /image`) real drift detection -
 was deleted from the registry out-of-band, something a `data` source has no
 way to express at all.
 
+`terraform plan` does call the service, but never to build: on create it
+sends `POST /build` with `dryRun` (a shallow clone that lists the
+repository's devcontainer.json files and resolves their image names, see
+"Several devcontainer.json files" below).
+
 **Both are meant to coexist.** The module is for anyone who can't or doesn't
 want to install a custom provider binary; this provider is for anyone who
 wants plan-time safety and can install one.
 
+## Several devcontainer.json files
+
+A repository can have a root devcontainer.json (id `main`) and one per
+`.devcontainer/<folder>/` (id `<folder>`); a devcontainer-builder service
+that lists images builds one image per file (its ADR-0016). `images` maps
+each id to its image; `image`/`resolved_*` keep describing the first one,
+so existing configurations work unchanged. `instances` builds a subset.
+
+- **Plan:** on create (or replacement), a dry run plans `images` with known
+  keys, so `for_each = devcontainerbuilder_build.x.images` works on the
+  first apply; an unknown `instances` id is a plan error. For an existing
+  resource with `instances` unset, every plan repeats the dry run and
+  rebuilds when a devcontainer.json was added or removed upstream; setting
+  `instances` skips that clone. Against a service too old for dry runs no
+  dry run is sent (it would really build): `images` is then known after
+  apply, a single `main` entry.
+- **Apply** builds exactly the planned ids.
+- State from an earlier provider version plans no change: the next refresh
+  records its image as the single `main` entry, and it isn't re-listed
+  until something else rebuilds it.
+
 ## What Read and Delete actually do (and don't)
 
-- **Read** calls `GET /image` to check whether the built image still exists
-  in its registry. If it doesn't, the resource is removed from state so the
+- **Read** calls `GET /image` for every image in `images` to check it still
+  exists in its registry - any one missing rebuilds them all. If it doesn't, the resource is removed from state so the
   next plan recreates it. This is real drift detection, but narrow: it can
   only tell you "is the image this resource created still there" - it
   cannot detect a moved branch HEAD, a retagged image, or anything else
   about the source repository. Only a config change on the resource itself,
   or the image disappearing, ever produces a diff.
-- **Delete** calls `DELETE /image`, best-effort. Several major registries
+- **Delete** calls `DELETE /image` for every image, best-effort. Several major registries
   (Docker Hub notably) don't support manifest deletion via the standard API
   at all; when that happens, the resource is still removed from Terraform
   state (there's nothing more to do about it), and a warning is logged.
@@ -56,7 +82,7 @@ linked to registry.terraform.io yet - until that one-time manual step
 happens (via HashiCorp's GitHub App flow, after the first signed tag),
 `dev_overrides` below is still the only way to actually use it.
 
-Changing `repository`, `branch` or `image_spec` forces replacement - the
+Changing `repository`, `branch`, `image_spec` or `instances` forces replacement - the
 service has no partial-update API, so a changed build input means a
 brand-new build. Changing only `git_credentials` or `registry_credentials`
 (rotating a token) is an in-place update that stores the new values without

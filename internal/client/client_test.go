@@ -121,3 +121,50 @@ func expectError[T error](message string) func(t *testing.T, res DevcontainerRes
 		}
 	}
 }
+
+// A service without dryRun would ignore the field and really build, so a
+// dry run is only sent when its OpenAPI document lists dryRun.
+func TestBuildDryRunProbe(t *testing.T) {
+	cases := []struct {
+		name      string
+		docStatus int
+		doc       string
+		wantErr   error
+		wantPosts int
+	}{
+		{name: "dryRun listed", docStatus: http.StatusOK, doc: `{"paths":{"/build":{"post":{"requestBody":{"content":{"application/json":{"schema":{"properties":{"repository":{},"dryRun":{}}}}}}}}}}`, wantPosts: 2},
+		{name: "dryRun not listed", docStatus: http.StatusOK, doc: `{"paths":{"/build":{"post":{"requestBody":{"content":{"application/json":{"schema":{"properties":{"repository":{}}}}}}}}}}`, wantErr: ErrDryRunUnsupported},
+		{name: "no OpenAPI document", docStatus: http.StatusNotFound, doc: `{"error":"not found"}`, wantErr: ErrDryRunUnsupported},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			probes, posts := 0, 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/documentation/json":
+					probes++
+					w.WriteHeader(c.docStatus)
+					_, _ = w.Write([]byte(c.doc))
+				case "/build":
+					posts++
+					_, _ = w.Write([]byte(`{"image":"r/n:t","registry":"r","name":"n","tag":"t","images":[{"id":"main","configPath":".devcontainer.json","image":"r/n:t","registry":"r","name":"n","tag":"t"}]}`))
+				}
+			}))
+			defer srv.Close()
+			cl := NewHTTPClient(srv.URL, srv.Client())
+
+			for i := 0; i < 2; i++ {
+				res, err := cl.Build(context.Background(), BuildRequest{Repository: "https://git.example/a.git", DryRun: true})
+				if !errors.Is(err, c.wantErr) {
+					t.Fatalf("expected error %v, got %v", c.wantErr, err)
+				}
+				if err == nil && (len(res.Images) != 1 || res.Images[0].ConfigPath != ".devcontainer.json") {
+					t.Fatalf("images not decoded: %+v", res)
+				}
+			}
+			if probes != 1 || posts != c.wantPosts {
+				t.Fatalf("expected 1 probe (cached) and %d POST /build, got %d and %d", c.wantPosts, probes, posts)
+			}
+		})
+	}
+}
