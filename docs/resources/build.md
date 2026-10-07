@@ -62,6 +62,7 @@ output "image" {
 
 ### Read-Only
 
+- `commit` (String) Full SHA of the commit the image was built from - check it out to get the working copy that matches the image. Null when built by a devcontainer-builder older than v0.3.0.
 - `id` (String) Same value as image - the service has no separate build-ID concept.
 - `image` (String) The built and pushed image reference, e.g. ghcr.io/org/repo:sha-abc1234.
 - `resolved_name` (String) The image name actually used (from the /build response).
