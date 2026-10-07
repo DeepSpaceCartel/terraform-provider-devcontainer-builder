@@ -54,9 +54,17 @@ Release infrastructure is in place (`.goreleaser.yml`, GPG-signed builds via
 generated docs via `tfplugindocs`) but the provider itself hasn't been
 linked to registry.terraform.io yet - until that one-time manual step
 happens (via HashiCorp's GitHub App flow, after the first signed tag),
-`dev_overrides` below is still the only way to actually use it. Every
-resource attribute forces replacement on change - the service has no
-partial-update API, so any input change means a brand-new build.
+`dev_overrides` below is still the only way to actually use it.
+
+Changing `repository`, `branch` or `image_spec` forces replacement - the
+service has no partial-update API, so a changed build input means a
+brand-new build. Changing only `git_credentials` or `registry_credentials`
+(rotating a token) is an in-place update that stores the new values without
+rebuilding - no `lifecycle { ignore_changes }` workaround needed. `branch`
+left unset builds the repository's default branch (on a service that
+reports it; older services build `main`) and records which one it was.
+An existing image can be imported by reference - see the generated
+`docs/resources/build.md`.
 
 Once linked, its registry address is `deepspacecartel/devcontainer-builder`
 - the address's name segment is the suffix after `terraform-provider-`, not
@@ -108,7 +116,17 @@ GPG-sign binaries for the OS/arch matrix the Terraform Registry expects,
 then cuts a GitHub Release with those artifacts plus
 `terraform-registry-manifest.json`. Requires `GPG_PRIVATE_KEY`/
 `GPG_PASSPHRASE` repo secrets (the key registered with the provider's
-HashiCorp Registry account once linked).
+HashiCorp Registry account once linked). Before tagging, move
+`CHANGELOG.md`'s `[Unreleased]` entries under the new version and date.
+
+## Tests and generated docs
+
+`go test ./...` runs everything offline, including real
+`terraform plan`/`apply`/`destroy` cycles (`terraform-plugin-testing`'s
+`resource.UnitTest`, no `TF_ACC` needed) against an in-process fake of the
+service (`internal/provider/fake_service_test.go`). They need a `terraform`
+binary on `PATH` (or `TF_ACC_TERRAFORM_PATH`); without one,
+terraform-plugin-testing downloads it.
 
 Generated docs (`docs/`) come from `go generate ./...`
 ([`tfplugindocs`](https://github.com/hashicorp/terraform-plugin-docs),
