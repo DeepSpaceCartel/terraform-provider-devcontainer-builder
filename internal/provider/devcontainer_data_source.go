@@ -34,6 +34,9 @@ var (
 		"kind": types.StringType, "name": types.StringType, "default": types.StringType, "used_in": types.ListType{ElemType: types.StringType},
 	}}
 	runtimeAttrTypes = map[string]attr.Type{
+		"remote_user_uid":    types.Int64Type,
+		"remote_user_gid":    types.Int64Type,
+		"remote_user_home":   types.StringType,
 		"cap_add":            types.ListType{ElemType: types.StringType},
 		"privileged":         types.BoolType,
 		"init":               types.BoolType,
@@ -74,6 +77,9 @@ type variableModel struct {
 }
 
 type runtimeModel struct {
+	RemoteUserUID     types.Int64      `tfsdk:"remote_user_uid"`
+	RemoteUserGID     types.Int64      `tfsdk:"remote_user_gid"`
+	RemoteUserHome    types.String     `tfsdk:"remote_user_home"`
 	CapAdd            []string         `tfsdk:"cap_add"`
 	Privileged        types.Bool       `tfsdk:"privileged"`
 	Init              types.Bool       `tfsdk:"init"`
@@ -249,7 +255,7 @@ func (d *devcontainerDataSource) Schema(ctx context.Context, req datasource.Sche
 			"runtime": schema.ObjectAttribute{
 				Computed:       true,
 				AttributeTypes: runtimeAttrTypes,
-				Description:    "Container settings translated for a Kubernetes pod: cap_add, privileged, init, seccomp_unconfined, shm_size_bytes, hostname, host_aliases.",
+				Description:    "Container settings translated for a Kubernetes pod: remote_user_uid/remote_user_gid/remote_user_home (the remote user's account in the image, recorded at build time by devcontainer-builder 0.3.0+ - set runAsUser/runAsGroup/fsGroup from them; null when unknown), cap_add, privileged, init, seccomp_unconfined, shm_size_bytes, hostname, host_aliases.",
 			},
 			"host_requirements": schema.ObjectAttribute{
 				Computed:       true,
@@ -435,6 +441,9 @@ func runtimeState(ctx context.Context, state *devcontainerDataSourceModel, resul
 		capAdd = []string{}
 	}
 	runtime := runtimeModel{
+		RemoteUserUID:     types.Int64PointerValue(rt.RemoteUserUID),
+		RemoteUserGID:     types.Int64PointerValue(rt.RemoteUserGID),
+		RemoteUserHome:    types.StringPointerValue(rt.RemoteUserHome),
 		CapAdd:            capAdd,
 		Privileged:        types.BoolValue(rt.Privileged),
 		Init:              types.BoolValue(rt.Init),

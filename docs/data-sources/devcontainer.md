@@ -83,7 +83,7 @@ output "extensions" {
 - `metadata_json` (String) The raw devcontainer.metadata label entries, as a JSON array string.
 - `mounts` (List of Object) Volume and tmpfs mounts from mounts and runArgs (bind mounts are dropped with a warning). target may contain workspace placeholders like ${containerWorkspaceFolder}. (see [below for nested schema](#nestedatt--mounts))
 - `remote_user` (String) Merged remoteUser - the user tools and lifecycle commands should run as. Null if no entry sets it.
-- `runtime` (Object) Container settings translated for a Kubernetes pod: cap_add, privileged, init, seccomp_unconfined, shm_size_bytes, hostname, host_aliases. (see [below for nested schema](#nestedatt--runtime))
+- `runtime` (Object) Container settings translated for a Kubernetes pod: remote_user_uid/remote_user_gid/remote_user_home (the remote user's account in the image, recorded at build time by devcontainer-builder 0.3.0+ - set runAsUser/runAsGroup/fsGroup from them; null when unknown), cap_add, privileged, init, seccomp_unconfined, shm_size_bytes, hostname, host_aliases. (see [below for nested schema](#nestedatt--runtime))
 - `settings_json` (String) VS Code settings from every entry's customizations.vscode.settings, merged per key (last entry wins), as a JSON object string - jsondecode() it.
 - `variables` (List of Object) Every devcontainer.json variable the image uses (kind localEnv/containerEnv/context, name, default, used_in). In scripts, ${localEnv:X} reads $DEVCONTAINER_LOCALENV_X, ${containerWorkspaceFolder} reads $DEVCONTAINER_WORKSPACE_FOLDER (…Basename: $DEVCONTAINER_WORKSPACE_FOLDER_BASENAME), ${devcontainerId} reads $DEVCONTAINER_ID, ${containerEnv:X} reads $X - all for the caller to set at runtime. (see [below for nested schema](#nestedatt--variables))
 - `warnings` (List of String) Things in the label the service could not represent faithfully (e.g. an unsubstituted ${containerWorkspaceFolder}).
@@ -141,6 +141,9 @@ Read-Only:
 - `hostname` (String)
 - `init` (Boolean)
 - `privileged` (Boolean)
+- `remote_user_gid` (Number)
+- `remote_user_home` (String)
+- `remote_user_uid` (Number)
 - `seccomp_unconfined` (Boolean)
 - `shm_size_bytes` (Number)
 

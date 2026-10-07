@@ -97,6 +97,9 @@ type DevcontainerResult struct {
 // Runtime mirrors GET /devcontainer's `runtime` block.
 type Runtime struct {
 	RemoteUser        string      `json:"remoteUser"`
+	RemoteUserUID     *int64      `json:"remoteUserUid"`
+	RemoteUserGID     *int64      `json:"remoteUserGid"`
+	RemoteUserHome    *string     `json:"remoteUserHome"`
 	ContainerUser     *string     `json:"containerUser"`
 	Ports             []Port      `json:"ports"`
 	Mounts            []Mount     `json:"mounts"`
