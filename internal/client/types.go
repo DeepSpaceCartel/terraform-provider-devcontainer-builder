@@ -43,6 +43,9 @@ type BuildResult struct {
 	Registry string `json:"registry"`
 	Name     string `json:"name"`
 	Tag      string `json:"tag"`
+	// Commit is the full SHA the image was built from (service v0.3.0+;
+	// empty from older services).
+	Commit string `json:"commit,omitempty"`
 }
 
 // ImageRef identifies a previously-built image for CheckImage/DeleteImage.
@@ -81,6 +84,64 @@ type DevcontainerResult struct {
 	} `json:"vscode"`
 	Warnings []string        `json:"warnings"`
 	Metadata json.RawMessage `json:"metadata"`
+	// The fields below come from service v0.3.0+ (ADR-0012); they decode
+	// as zero values from older services.
+	EnvScripts struct {
+		ContainerEnv *string `json:"containerEnv"`
+		RemoteEnv    *string `json:"remoteEnv"`
+	} `json:"envScripts"`
+	Runtime   *Runtime   `json:"runtime"`
+	Variables []Variable `json:"variables"`
+}
+
+// Runtime mirrors GET /devcontainer's `runtime` block.
+type Runtime struct {
+	RemoteUser        string      `json:"remoteUser"`
+	RemoteUserUID     *int64      `json:"remoteUserUid"`
+	RemoteUserGID     *int64      `json:"remoteUserGid"`
+	RemoteUserHome    *string     `json:"remoteUserHome"`
+	ContainerUser     *string     `json:"containerUser"`
+	Ports             []Port      `json:"ports"`
+	Mounts            []Mount     `json:"mounts"`
+	CapAdd            []string    `json:"capAdd"`
+	Privileged        bool        `json:"privileged"`
+	Init              bool        `json:"init"`
+	SeccompUnconfined bool        `json:"seccompUnconfined"`
+	ShmSizeBytes      *int64      `json:"shmSizeBytes"`
+	Hostname          *string     `json:"hostname"`
+	HostAliases       []HostAlias `json:"hostAliases"`
+	Resources         struct {
+		Cpus         *float64        `json:"cpus"`
+		MemoryBytes  *int64          `json:"memoryBytes"`
+		StorageBytes *int64          `json:"storageBytes"`
+		Gpu          json.RawMessage `json:"gpu"`
+	} `json:"resources"`
+}
+
+type Port struct {
+	Port          int64  `json:"port"`
+	Label         string `json:"label,omitempty"`
+	Protocol      string `json:"protocol,omitempty"`
+	OnAutoForward string `json:"onAutoForward,omitempty"`
+}
+
+type Mount struct {
+	Kind     string `json:"kind"`
+	Source   string `json:"source,omitempty"`
+	Target   string `json:"target"`
+	ReadOnly bool   `json:"readOnly"`
+}
+
+type HostAlias struct {
+	IP        string   `json:"ip"`
+	Hostnames []string `json:"hostnames"`
+}
+
+type Variable struct {
+	Kind    string   `json:"kind"`
+	Name    string   `json:"name"`
+	Default *string  `json:"default,omitempty"`
+	UsedIn  []string `json:"usedIn"`
 }
 
 // DevcontainerNotFoundError is GET /devcontainer's 404 (no such tag) or 422

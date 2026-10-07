@@ -56,6 +56,7 @@ type buildResourceModel struct {
 	ResolvedRegistry    types.String              `tfsdk:"resolved_registry"`
 	ResolvedName        types.String              `tfsdk:"resolved_name"`
 	ResolvedTag         types.String              `tfsdk:"resolved_tag"`
+	Commit              types.String              `tfsdk:"commit"`
 }
 
 func (r *buildResource) Metadata(ctx context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -164,6 +165,10 @@ func (r *buildResource) Schema(ctx context.Context, req resource.SchemaRequest, 
 			"resolved_tag": schema.StringAttribute{
 				Computed:    true,
 				Description: "The image tag actually used (from the /build response).",
+			},
+			"commit": schema.StringAttribute{
+				Computed:    true,
+				Description: "Full SHA of the commit the image was built from - check it out to get the working copy that matches the image. Null when built by a devcontainer-builder older than v0.3.0.",
 			},
 		},
 	}
@@ -296,6 +301,7 @@ func (r *buildResource) doBuild(ctx context.Context, model buildResourceModel) (
 	model.ResolvedRegistry = types.StringValue(result.Registry)
 	model.ResolvedName = types.StringValue(result.Name)
 	model.ResolvedTag = types.StringValue(result.Tag)
+	model.Commit = stringOrNull(result.Commit)
 	return model, diags
 }
 

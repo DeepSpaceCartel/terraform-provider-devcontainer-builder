@@ -21,7 +21,7 @@ func TestDevcontainerStatusMapping(t *testing.T) {
 		{
 			name:   "200 decodes the response",
 			status: http.StatusOK,
-			body:   `{"image":"r/n:t","digest":"sha256:abc","configuration":{"remoteUser":"node"},"lifecycleScripts":{"postCreateCommand":"#!/bin/sh\n","postAttachCommand":null},"vscode":{"extensions":["a.b"],"settings":{"x":1}},"warnings":[],"metadata":[{}]}`,
+			body:   `{"image":"r/n:t","digest":"sha256:abc","configuration":{"remoteUser":"node"},"lifecycleScripts":{"postCreateCommand":"#!/bin/sh\n","postAttachCommand":null},"vscode":{"extensions":["a.b"],"settings":{"x":1}},"warnings":[],"metadata":[{}],"envScripts":{"containerEnv":"export A=\"1\"\n","remoteEnv":null},"runtime":{"remoteUser":"dev","remoteUserUid":1001,"remoteUserGid":1002,"remoteUserHome":"/home/dev","containerUser":null,"ports":[{"port":3000,"label":"Web"}],"mounts":[{"kind":"volume","source":"v","target":"/t","readOnly":false}],"capAdd":["SYS_PTRACE"],"privileged":false,"init":true,"seccompUnconfined":false,"shmSizeBytes":268435456,"hostname":null,"hostAliases":[{"ip":"10.0.0.5","hostnames":["h"]}],"resources":{"cpus":2,"memoryBytes":null,"storageBytes":null,"gpu":null}},"variables":[{"kind":"localEnv","name":"T","default":"d","usedIn":["remoteEnv.T"]}]}`,
 			check: func(t *testing.T, res DevcontainerResult, err error) {
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)
@@ -34,6 +34,18 @@ func TestDevcontainerStatusMapping(t *testing.T) {
 				}
 				if res.LifecycleScripts["postAttachCommand"] != nil {
 					t.Fatalf("null hook should decode as nil")
+				}
+				if res.EnvScripts.ContainerEnv == nil || *res.EnvScripts.ContainerEnv != "export A=\"1\"\n" || res.EnvScripts.RemoteEnv != nil {
+					t.Fatalf("envScripts not decoded: %+v", res.EnvScripts)
+				}
+				rt := res.Runtime
+				if rt == nil || rt.RemoteUser != "dev" || rt.RemoteUserUID == nil || *rt.RemoteUserUID != 1001 || *rt.RemoteUserGID != 1002 || *rt.RemoteUserHome != "/home/dev" || rt.ContainerUser != nil || len(rt.Ports) != 1 || rt.Ports[0].Label != "Web" ||
+					!rt.Init || rt.ShmSizeBytes == nil || *rt.ShmSizeBytes != 268435456 || rt.Hostname != nil ||
+					len(rt.HostAliases) != 1 || rt.Resources.Cpus == nil || *rt.Resources.Cpus != 2 || rt.Resources.MemoryBytes != nil {
+					t.Fatalf("runtime not decoded: %+v", rt)
+				}
+				if len(res.Variables) != 1 || res.Variables[0].Default == nil || *res.Variables[0].Default != "d" {
+					t.Fatalf("variables not decoded: %+v", res.Variables)
 				}
 			},
 		},

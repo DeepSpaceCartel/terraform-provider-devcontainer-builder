@@ -34,7 +34,16 @@ locals {
   post_create = lookup(local.dc.lifecycle_scripts, "postCreateCommand", "")
 
   vscode_settings = jsondecode(local.dc.settings_json)
-  forward_ports   = try(jsondecode(local.dc.configuration_json).forwardPorts, [])
+
+  # Typed runtime settings (service >= 0.3.0): ports, mounts, capabilities,
+  # resources - e.g. one coder_app per forward_ports entry.
+  forward_ports = local.dc.forward_ports
+  cap_add       = local.dc.runtime.cap_add
+  cpus          = local.dc.host_requirements.cpus
+
+  # Variables are shell references, set at runtime: source these, in this
+  # order, with DEVCONTAINER_WORKSPACE_FOLDER and friends exported first.
+  env_setup = join("", [for k in ["containerEnv", "remoteEnv"] : lookup(local.dc.env_scripts, k, "")])
 }
 
 output "remote_user" {
@@ -65,13 +74,20 @@ output "extensions" {
 - `configuration_json` (String) The full merged configuration - exactly the Dev Containers CLI's mergedConfiguration shape - as a JSON string, for anything not exposed above (forwardPorts, remoteEnv, mounts, ...).
 - `container_user` (String) Merged containerUser - the user the container itself runs as. Null if no entry sets it.
 - `digest` (String) Digest of the (platform) manifest the metadata was read from.
+- `env_scripts` (Map of String) containerEnv and remoteEnv as POSIX sh `export` scripts (keys containerEnv/remoteEnv, only when non-empty). Source containerEnv, then remoteEnv, before starting the agent; values like ${PATH}:/opt/bin expand against the container's real environment.
 - `extensions` (List of String) VS Code extension IDs from every entry's customizations.vscode.extensions, in order, de-duplicated case-insensitively, with "-publisher.name" removals applied.
+- `forward_ports` (List of Object) Numeric forwardPorts with their portsAttributes (label, protocol, on_auto_forward). (see [below for nested schema](#nestedatt--forward_ports))
+- `host_requirements` (Object) hostRequirements (or runArgs --cpus/--memory): cpus, memory_bytes, storage_bytes, and gpu as JSON. Null fields when unset. (see [below for nested schema](#nestedatt--host_requirements))
 - `id` (String) The image reference, <registry>/<name>:<tag>.
 - `lifecycle_scripts` (Map of String) Each lifecycle hook (onCreateCommand, updateContentCommand, postCreateCommand, postStartCommand, postAttachCommand) rendered as one POSIX sh script with the Dev Containers CLI's semantics: every entry's command in order, a string via /bin/sh -c, an array as argv, an object's commands in parallel, stopping at the first failure. Only hooks some entry sets are present - use lookup(..., hook, ""). cwd, user and hook order are the caller's to choose.
 - `metadata_json` (String) The raw devcontainer.metadata label entries, as a JSON array string.
+- `mounts` (List of Object) Volume and tmpfs mounts from mounts and runArgs (bind mounts are dropped with a warning). target may contain workspace placeholders like ${containerWorkspaceFolder}. (see [below for nested schema](#nestedatt--mounts))
 - `remote_user` (String) Merged remoteUser - the user tools and lifecycle commands should run as. Null if no entry sets it.
+- `runtime` (Object) Container settings translated for a Kubernetes pod: remote_user_uid/remote_user_gid/remote_user_home (the remote user's account in the image, recorded at build time by devcontainer-builder 0.3.0+ - set runAsUser/runAsGroup/fsGroup from them; null when unknown), cap_add, privileged, init, seccomp_unconfined, shm_size_bytes, hostname, host_aliases. (see [below for nested schema](#nestedatt--runtime))
 - `settings_json` (String) VS Code settings from every entry's customizations.vscode.settings, merged per key (last entry wins), as a JSON object string - jsondecode() it.
+- `variables` (List of Object) Every devcontainer.json variable the image uses (kind localEnv/containerEnv/context, name, default, used_in). In scripts, ${localEnv:X} reads $DEVCONTAINER_LOCALENV_X, ${containerWorkspaceFolder} reads $DEVCONTAINER_WORKSPACE_FOLDER (…Basename: $DEVCONTAINER_WORKSPACE_FOLDER_BASENAME), ${devcontainerId} reads $DEVCONTAINER_ID, ${containerEnv:X} reads $X - all for the caller to set at runtime. (see [below for nested schema](#nestedatt--variables))
 - `warnings` (List of String) Things in the label the service could not represent faithfully (e.g. an unsubstituted ${containerWorkspaceFolder}).
+- `workspace_folder` (String) devcontainer.json's workspaceFolder, raw (default /workspaces/${localWorkspaceFolderBasename}) - substitute ${localWorkspaceFolderBasename}/${containerWorkspaceFolderBasename} yourself. Needs an image built by devcontainer-builder v0.3.0+.
 
 <a id="nestedatt--registry_credentials"></a>
 ### Nested Schema for `registry_credentials`
@@ -80,3 +96,73 @@ Required:
 
 - `password` (String, Sensitive)
 - `username` (String, Sensitive)
+
+
+<a id="nestedatt--forward_ports"></a>
+### Nested Schema for `forward_ports`
+
+Read-Only:
+
+- `label` (String)
+- `on_auto_forward` (String)
+- `port` (Number)
+- `protocol` (String)
+
+
+<a id="nestedatt--host_requirements"></a>
+### Nested Schema for `host_requirements`
+
+Read-Only:
+
+- `cpus` (Number)
+- `gpu_json` (String)
+- `memory_bytes` (Number)
+- `storage_bytes` (Number)
+
+
+<a id="nestedatt--mounts"></a>
+### Nested Schema for `mounts`
+
+Read-Only:
+
+- `kind` (String)
+- `read_only` (Boolean)
+- `source` (String)
+- `target` (String)
+
+
+<a id="nestedatt--runtime"></a>
+### Nested Schema for `runtime`
+
+Read-Only:
+
+- `cap_add` (List of String)
+- `host_aliases` (List of Object) (see [below for nested schema](#nestedobjatt--runtime--host_aliases))
+- `hostname` (String)
+- `init` (Boolean)
+- `privileged` (Boolean)
+- `remote_user_gid` (Number)
+- `remote_user_home` (String)
+- `remote_user_uid` (Number)
+- `seccomp_unconfined` (Boolean)
+- `shm_size_bytes` (Number)
+
+<a id="nestedobjatt--runtime--host_aliases"></a>
+### Nested Schema for `runtime.host_aliases`
+
+Read-Only:
+
+- `hostnames` (List of String)
+- `ip` (String)
+
+
+
+<a id="nestedatt--variables"></a>
+### Nested Schema for `variables`
+
+Read-Only:
+
+- `default` (String)
+- `kind` (String)
+- `name` (String)
+- `used_in` (List of String)

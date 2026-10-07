@@ -19,7 +19,16 @@ locals {
   post_create = lookup(local.dc.lifecycle_scripts, "postCreateCommand", "")
 
   vscode_settings = jsondecode(local.dc.settings_json)
-  forward_ports   = try(jsondecode(local.dc.configuration_json).forwardPorts, [])
+
+  # Typed runtime settings (service >= 0.3.0): ports, mounts, capabilities,
+  # resources - e.g. one coder_app per forward_ports entry.
+  forward_ports = local.dc.forward_ports
+  cap_add       = local.dc.runtime.cap_add
+  cpus          = local.dc.host_requirements.cpus
+
+  # Variables are shell references, set at runtime: source these, in this
+  # order, with DEVCONTAINER_WORKSPACE_FOLDER and friends exported first.
+  env_setup = join("", [for k in ["containerEnv", "remoteEnv"] : lookup(local.dc.env_scripts, k, "")])
 }
 
 output "remote_user" {
