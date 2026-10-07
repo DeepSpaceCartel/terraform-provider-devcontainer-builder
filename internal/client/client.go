@@ -20,6 +20,7 @@ type Client interface {
 	Build(ctx context.Context, req BuildRequest) (BuildResult, error)
 	CheckImage(ctx context.Context, ref ImageRef, auth *RegistryAuth) (bool, error)
 	DeleteImage(ctx context.Context, ref ImageRef, auth *RegistryAuth) (DeleteResult, error)
+	Devcontainer(ctx context.Context, ref ImageRef, platform string, auth *RegistryAuth) (DevcontainerResult, error)
 }
 
 // HTTPClient is the sync implementation of Client, calling the
@@ -131,12 +132,68 @@ func (c *HTTPClient) DeleteImage(ctx context.Context, ref ImageRef, auth *Regist
 	return result, nil
 }
 
-func (c *HTTPClient) imageURL(ref ImageRef) string {
+// Devcontainer reads the image's merged Dev Container metadata via GET
+// /devcontainer. platform may be "" for the service's default (linux/amd64).
+func (c *HTTPClient) Devcontainer(ctx context.Context, ref ImageRef, platform string, auth *RegistryAuth) (DevcontainerResult, error) {
+	q := imageQuery(ref)
+	if platform != "" {
+		q.Set("platform", platform)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, c.Endpoint+"/devcontainer?"+q.Encode(), nil)
+	if err != nil {
+		return DevcontainerResult{}, fmt.Errorf("devcontainer request: %w", err)
+	}
+	setRegistryAuthHeaders(httpReq, auth)
+
+	res, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		return DevcontainerResult{}, fmt.Errorf("calling %s/devcontainer: %w", c.Endpoint, err)
+	}
+	defer res.Body.Close()
+
+	respBody, err := io.ReadAll(res.Body)
+	if err != nil {
+		return DevcontainerResult{}, fmt.Errorf("reading /devcontainer response: %w", err)
+	}
+
+	switch {
+	case res.StatusCode == http.StatusOK:
+		var result DevcontainerResult
+		if err := json.Unmarshal(respBody, &result); err != nil {
+			return DevcontainerResult{}, fmt.Errorf("unmarshal /devcontainer response: %w", err)
+		}
+		return result, nil
+	case res.StatusCode == http.StatusNotFound && !isJSONError(respBody):
+		// A bare 404 (no JSON error body) is a service older than v0.2.0,
+		// which has no GET /devcontainer route at all.
+		return DevcontainerResult{}, &RequestError{StatusCode: res.StatusCode, Message: "the devcontainer-builder service has no GET /devcontainer endpoint - it needs v0.2.0 or later"}
+	case res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusUnprocessableEntity:
+		return DevcontainerResult{}, &DevcontainerNotFoundError{StatusCode: res.StatusCode, Message: errorMessage(respBody)}
+	case res.StatusCode >= 400 && res.StatusCode < 500:
+		return DevcontainerResult{}, &RequestError{StatusCode: res.StatusCode, Message: errorMessage(respBody)}
+	default:
+		return DevcontainerResult{}, &RegistryUpstreamError{StatusCode: res.StatusCode, Message: errorMessage(respBody)}
+	}
+}
+
+// The service's catch-all 404 is also JSON ({"error":"not found"}), so
+// "no such route" can't be told apart by content type alone - only by that
+// exact generic message, versus GET /devcontainer's own specific one.
+func isJSONError(body []byte) bool {
+	var parsed errorResponse
+	return json.Unmarshal(body, &parsed) == nil && parsed.Error != "" && parsed.Error != "not found"
+}
+
+func imageQuery(ref ImageRef) url.Values {
 	q := url.Values{}
 	q.Set("registry", ref.Registry)
 	q.Set("name", ref.Name)
 	q.Set("tag", ref.Tag)
-	return c.Endpoint + "/image?" + q.Encode()
+	return q
+}
+
+func (c *HTTPClient) imageURL(ref ImageRef) string {
+	return c.Endpoint + "/image?" + imageQuery(ref).Encode()
 }
 
 func setRegistryAuthHeaders(req *http.Request, auth *RegistryAuth) {

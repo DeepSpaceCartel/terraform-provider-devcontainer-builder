@@ -2,7 +2,11 @@
 
 A native Terraform provider wrapping [devcontainer-builder](https://github.com/DeepSpaceCartel/devcontainer-builder)'s
 service `POST /build`, `GET /image`, and `DELETE /image` endpoints, as a
-`devcontainerbuilder_build` **resource**.
+`devcontainerbuilder_build` **resource**, and its `GET /devcontainer`
+endpoint (service v0.2.0+) as a `devcontainerbuilder_devcontainer` **data
+source** - the built image's merged Dev Container configuration, its
+lifecycle hooks as ready-to-run `sh` scripts, and its merged VS Code
+extensions/settings.
 
 This repo was split out of `devcontainer-builder`'s `provider/` directory
 into its own repository so it can eventually be published to the Terraform

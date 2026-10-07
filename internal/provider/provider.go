@@ -51,7 +51,7 @@ func (p *devcontainerBuilderProvider) Metadata(ctx context.Context, req provider
 
 func (p *devcontainerBuilderProvider) Schema(ctx context.Context, req provider.SchemaRequest, resp *provider.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Description: "Wraps a devcontainer-builder service instance's POST /build, GET /image, and DELETE /image endpoints.",
+		Description: "Wraps a devcontainer-builder service instance's POST /build, GET/DELETE /image, and GET /devcontainer endpoints.",
 		Attributes: map[string]schema.Attribute{
 			"endpoint": schema.StringAttribute{
 				Optional:    true,
@@ -105,10 +105,13 @@ func (p *devcontainerBuilderProvider) Configure(ctx context.Context, req provide
 
 	c := client.NewHTTPClient(endpoint, &http.Client{})
 
-	resp.ResourceData = &providerData{client: c, requestTimeout: timeout}
+	data := &providerData{client: c, requestTimeout: timeout}
+	resp.ResourceData = data
+	resp.DataSourceData = data
 }
 
-// providerData is handed to each resource's Configure via req.ProviderData.
+// providerData is handed to each resource's and data source's Configure via
+// req.ProviderData.
 type providerData struct {
 	client         client.Client
 	requestTimeout time.Duration
@@ -120,9 +123,11 @@ func (p *devcontainerBuilderProvider) Resources(ctx context.Context) []func() re
 	}
 }
 
-// No data sources for v1 - the whole point of this provider is that a
-// resource, not a data source, is what avoids running the real build on
-// every `terraform plan` (see provider/README.md).
+// The build itself stays a resource - that's what avoids running a real
+// build on every `terraform plan`. Reading an already-built image's
+// metadata is a cheap registry read, so it's a data source.
 func (p *devcontainerBuilderProvider) DataSources(ctx context.Context) []func() datasource.DataSource {
-	return nil
+	return []func() datasource.DataSource{
+		NewDevcontainerDataSource,
+	}
 }
