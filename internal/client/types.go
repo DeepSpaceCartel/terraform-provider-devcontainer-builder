@@ -1,7 +1,9 @@
 // Package client is an HTTP client for the devcontainer-builder service's
-// POST /build, GET /image, and DELETE /image endpoints. Types here mirror
-// service/src/types.ts exactly.
+// POST /build, GET/DELETE /image, and GET /devcontainer endpoints. Types
+// here mirror service/src/types.ts exactly.
 package client
+
+import "encoding/json"
 
 // ImageTarget mirrors service/src/types.ts's ImageTarget.
 type ImageTarget struct {
@@ -62,6 +64,36 @@ type RegistryAuth struct {
 type DeleteResult struct {
 	Deleted bool   `json:"deleted"`
 	Reason  string `json:"reason,omitempty"`
+}
+
+// DevcontainerResult mirrors the GET /devcontainer response (service
+// v0.2.0+, see the service's ADR-0011). Configuration, Settings and
+// Metadata stay raw JSON: their shape is the Dev Containers spec's, open
+// ended, and handed to Terraform as JSON strings rather than modeled here.
+type DevcontainerResult struct {
+	Image            string             `json:"image"`
+	Digest           string             `json:"digest,omitempty"`
+	Configuration    json.RawMessage    `json:"configuration"`
+	LifecycleScripts map[string]*string `json:"lifecycleScripts"`
+	Vscode           struct {
+		Extensions []string        `json:"extensions"`
+		Settings   json.RawMessage `json:"settings"`
+	} `json:"vscode"`
+	Warnings []string        `json:"warnings"`
+	Metadata json.RawMessage `json:"metadata"`
+}
+
+// DevcontainerNotFoundError is GET /devcontainer's 404 (no such tag) or 422
+// (the image exists but has no usable devcontainer.metadata label, or no
+// manifest for the requested platform) - an answer about the image itself,
+// distinct from a registry failure.
+type DevcontainerNotFoundError struct {
+	StatusCode int
+	Message    string
+}
+
+func (e *DevcontainerNotFoundError) Error() string {
+	return e.Message
 }
 
 // errorResponse mirrors service/src/types.ts's ErrorResponse - the shape of
