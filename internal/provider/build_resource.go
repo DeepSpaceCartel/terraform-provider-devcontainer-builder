@@ -3,15 +3,14 @@ package provider
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/objectplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-log/tflog"
@@ -66,24 +65,29 @@ func (r *buildResource) Metadata(ctx context.Context, req resource.MetadataReque
 func (r *buildResource) Schema(ctx context.Context, req resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		Description: "Triggers a devcontainer-builder build (clone + devcontainer build + push) via POST /build. " +
-			"Every attribute forces replacement on change - the service has no partial-update API, so any input " +
-			"change means a brand-new build. Read checks the built image still exists in its registry (GET /image); " +
-			"Delete attempts to remove it (DELETE /image), best-effort, since not all registries support deletion.",
+			"Changing repository, branch or image_spec rebuilds the image (replacement) - the service has no " +
+			"partial-update API. Changing only git_credentials or registry_credentials (e.g. rotating a token) " +
+			"updates them in state in place, without a rebuild. Read checks the built image still exists in its " +
+			"registry (GET /image); Delete attempts to remove it (DELETE /image), best-effort, since not all " +
+			"registries support deletion. Importable by image reference (see the Import section).",
 		Attributes: map[string]schema.Attribute{
 			"repository": schema.StringAttribute{
 				Required:    true,
-				Description: "Git repository URL (https://, ssh://, or SCP-style).",
+				Description: "Git repository URL (https://, ssh://, or SCP-style). Changing it rebuilds the image.",
 				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
+					stringRequiresReplaceUnlessImported(),
 				},
 			},
 			"branch": schema.StringAttribute{
-				Optional:    true,
-				Computed:    true,
-				Description: "Branch to build. Defaults to \"main\".",
-				Default:     stringdefault.StaticString("main"),
+				Optional: true,
+				Computed: true,
+				Description: "Branch to build. If unset, the service builds the repository's default branch and this " +
+					"attribute reports the branch it resolved (devcontainer-builder services that don't report one " +
+					"build \"main\"). Changing it rebuilds the image; so does removing an explicitly set branch, " +
+					"since the default branch may differ. Leaving it unset never rebuilds on its own - a later " +
+					"change of the repository's default branch is not detected.",
 				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
+					branchPlanModifier{},
 				},
 			},
 			"image_spec": schema.SingleNestedAttribute{
@@ -104,13 +108,14 @@ func (r *buildResource) Schema(ctx context.Context, req resource.SchemaRequest, 
 					},
 				},
 				PlanModifiers: []planmodifier.Object{
-					objectplanmodifier.RequiresReplace(),
+					objectRequiresReplaceUnlessImported(),
 				},
 			},
 			"git_credentials": schema.SingleNestedAttribute{
-				Optional:    true,
-				Sensitive:   true,
-				Description: "HTTPS git credentials for a private repository.",
+				Optional:  true,
+				Sensitive: true,
+				Description: "HTTPS git credentials for a private repository. Changing them (e.g. rotating the token) " +
+					"only updates state - it does not rebuild the image; the new values are used by the next rebuild.",
 				Attributes: map[string]schema.Attribute{
 					"username": schema.StringAttribute{
 						Required:  true,
@@ -121,14 +126,13 @@ func (r *buildResource) Schema(ctx context.Context, req resource.SchemaRequest, 
 						Sensitive: true,
 					},
 				},
-				PlanModifiers: []planmodifier.Object{
-					objectplanmodifier.RequiresReplace(),
-				},
 			},
 			"registry_credentials": schema.SingleNestedAttribute{
-				Optional:    true,
-				Sensitive:   true,
-				Description: "Credentials used to push the built image, and reused for the Read/Delete registry calls this resource makes later.",
+				Optional:  true,
+				Sensitive: true,
+				Description: "Credentials used to push the built image, and reused for the Read/Delete registry calls this " +
+					"resource makes later. Changing them (e.g. rotating the password) only updates state - it does not " +
+					"rebuild the image; later Read/Delete calls and the next rebuild use the new values.",
 				Attributes: map[string]schema.Attribute{
 					"registry": schema.StringAttribute{
 						Required: true,
@@ -142,32 +146,47 @@ func (r *buildResource) Schema(ctx context.Context, req resource.SchemaRequest, 
 						Sensitive: true,
 					},
 				},
-				PlanModifiers: []planmodifier.Object{
-					objectplanmodifier.RequiresReplace(),
-				},
 			},
 			"id": schema.StringAttribute{
-				Computed:    true,
+				Computed: true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
 				Description: "Same value as image - the service has no separate build-ID concept.",
 			},
 			"image": schema.StringAttribute{
-				Computed:    true,
+				Computed: true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
 				Description: "The built and pushed image reference, e.g. ghcr.io/org/repo:sha-abc1234.",
 			},
 			"resolved_registry": schema.StringAttribute{
-				Computed:    true,
+				Computed: true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
 				Description: "The registry the image was actually pushed to (from the /build response), used for the Read/Delete registry calls.",
 			},
 			"resolved_name": schema.StringAttribute{
-				Computed:    true,
+				Computed: true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
 				Description: "The image name actually used (from the /build response).",
 			},
 			"resolved_tag": schema.StringAttribute{
-				Computed:    true,
+				Computed: true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
 				Description: "The image tag actually used (from the /build response).",
 			},
 			"commit": schema.StringAttribute{
-				Computed:    true,
+				Computed: true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
 				Description: "Full SHA of the commit the image was built from - check it out to get the working copy that matches the image. Null when built by a devcontainer-builder older than v0.3.0.",
 			},
 		},
@@ -282,8 +301,8 @@ func (r *buildResource) buildRequest(model buildResourceModel) client.BuildReque
 }
 
 // doBuild calls POST /build and returns model populated with the result.
-// Shared by Create and Update (see Update's doc comment for why Update
-// exists at all despite being practically unreachable).
+// Shared by Create and Update (Update only reaches it when a build input
+// changed without a replacement, which today's schema never plans).
 func (r *buildResource) doBuild(ctx context.Context, model buildResourceModel) (buildResourceModel, diag.Diagnostics) {
 	var diags diag.Diagnostics
 
@@ -302,12 +321,31 @@ func (r *buildResource) doBuild(ctx context.Context, model buildResourceModel) (
 	model.ResolvedName = types.StringValue(result.Name)
 	model.ResolvedTag = types.StringValue(result.Tag)
 	model.Commit = stringOrNull(result.Commit)
+	model.Branch = resolvedBranch(model.Branch, result.Branch)
 	return model, diags
 }
 
+// defaultBranch is what a devcontainer-builder service that predates the
+// remote-default-branch behavior builds when the request names no branch.
+const defaultBranch = "main"
+
+// resolvedBranch is the branch to record in state: the configured one when
+// set (state must match configuration), otherwise the branch the service
+// reports it built, otherwise the older services' fixed default.
+func resolvedBranch(planned types.String, reported string) types.String {
+	if !planned.IsNull() && !planned.IsUnknown() {
+		return planned
+	}
+	if reported != "" {
+		return types.StringValue(reported)
+	}
+	return types.StringValue(defaultBranch)
+}
+
 func (r *buildResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
-	var plan buildResourceModel
+	var plan, config buildResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -319,6 +357,7 @@ func (r *buildResource) Create(ctx context.Context, req resource.CreateRequest, 
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &result)...)
+	resp.Diagnostics.Append(resp.Private.SetKey(ctx, privateBranchConfigured, flagValue(!config.Branch.IsNull()))...)
 }
 
 func (r *buildResource) credsFromState(model buildResourceModel) *client.RegistryAuth {
@@ -369,25 +408,119 @@ func (r *buildResource) Read(ctx context.Context, req resource.ReadRequest, resp
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
-// Update should be practically unreachable - every attribute above forces
-// replacement, so Terraform Core should always destroy+recreate instead of
-// calling this. It's implemented as a real rebuild (identical to Create)
-// rather than an error as a safer fallback in case some future attribute is
-// added without a RequiresReplace modifier.
+// Update never rebuilds for a credentials-only change: git_credentials and
+// registry_credentials are inputs to the *next* build (and to Read/Delete's
+// registry calls), not properties of the image already pushed, so rotating
+// a token just stores the new values. repository, branch and image_spec
+// force replacement instead, so Terraform never plans an Update for them -
+// except on the first apply after an import, where Update adopts them from
+// configuration (they're unknown from an image reference alone). A
+// build-input change reaching Update any other way still rebuilds, as a
+// fallback for a future attribute added without RequiresReplace - such an
+// attribute must also get the computed outputs (image, resolved_*, commit,
+// id) planned as unknown, since their UseStateForUnknown would otherwise
+// promise Terraform the old values.
 func (r *buildResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	var plan buildResourceModel
+	var plan, state, config buildResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
-
-	result, diags := r.doBuild(ctx, plan)
+	imported, diags := privateFlag(ctx, req.Private, privateImported)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
+	result := plan
+	if !imported && buildInputsChanged(plan, state) {
+		tflog.Info(ctx, "build inputs changed without a replacement; rebuilding")
+		var diags diag.Diagnostics
+		result, diags = r.doBuild(ctx, plan)
+		resp.Diagnostics.Append(diags...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+	} else {
+		// Same image: keep every computed value as built.
+		result.ID = state.ID
+		result.Image = state.Image
+		result.ResolvedRegistry = state.ResolvedRegistry
+		result.ResolvedName = state.ResolvedName
+		result.ResolvedTag = state.ResolvedTag
+		result.Commit = state.Commit
+		if result.Branch.IsUnknown() {
+			result.Branch = state.Branch
+		}
+	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &result)...)
+	resp.Diagnostics.Append(resp.Private.SetKey(ctx, privateImported, nil)...)
+	resp.Diagnostics.Append(resp.Private.SetKey(ctx, privateBranchConfigured, flagValue(!config.Branch.IsNull()))...)
+}
+
+// buildInputsChanged reports whether anything that determines the built
+// image (as opposed to the credentials used to build or read it) differs.
+func buildInputsChanged(plan, state buildResourceModel) bool {
+	if !plan.Repository.Equal(state.Repository) {
+		return true
+	}
+	if !plan.Branch.IsUnknown() && !plan.Branch.Equal(state.Branch) {
+		return true
+	}
+	return !imageSpecEqual(plan.ImageSpec, state.ImageSpec)
+}
+
+func imageSpecEqual(a, b *imageSpecModel) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Registry.Equal(b.Registry) && a.Name.Equal(b.Name) && a.Tag.Equal(b.Tag)
+}
+
+// ImportState adopts an already-pushed image by its reference. Accepted IDs:
+//
+//   - "<registry>/<name>:<tag>", e.g. ghcr.io/org/app:sha-abc1234 - split at
+//     the last "/" (registry ghcr.io/org, name app) and the ":" after it.
+//   - "<registry>,<name>,<tag>" - for an image name that itself contains "/".
+//
+// Only the image identity can be recovered from a reference. repository,
+// branch and image_spec are adopted from configuration on the first apply
+// (no rebuild), and credentials can never be imported - they are stored
+// from configuration on that same apply. Read (which runs as part of the
+// import) fails the import if the image doesn't exist; it uses the
+// service's ambient registry credentials, since none are in state yet.
+func (r *buildResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	registry, name, tag, err := parseImageImportID(req.ID)
+	if err != nil {
+		resp.Diagnostics.AddError("Invalid import ID", err.Error())
+		return
+	}
+	image := registry + "/" + name + ":" + tag
+
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), image)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("image"), image)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("resolved_registry"), registry)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("resolved_name"), name)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("resolved_tag"), tag)...)
+	resp.Diagnostics.Append(resp.Private.SetKey(ctx, privateImported, jsonTrue)...)
+}
+
+func parseImageImportID(id string) (registry, name, tag string, err error) {
+	if parts := strings.Split(id, ","); len(parts) > 1 {
+		if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+			return "", "", "", fmt.Errorf("expected <registry>,<name>,<tag>, got %q", id)
+		}
+		return parts[0], parts[1], parts[2], nil
+	}
+	slash := strings.LastIndex(id, "/")
+	colon := strings.LastIndex(id, ":")
+	if slash <= 0 || colon < slash+2 || colon == len(id)-1 {
+		return "", "", "", fmt.Errorf("expected an image reference <registry>/<name>:<tag> (e.g. ghcr.io/org/app:sha-abc1234) or <registry>,<name>,<tag>, got %q", id)
+	}
+	return id[:slash], id[slash+1 : colon], id[colon+1:], nil
 }
 
 // Delete attempts to remove the pushed image (DELETE /image), best-effort:
@@ -428,3 +561,4 @@ func (r *buildResource) Delete(ctx context.Context, req resource.DeleteRequest, 
 var _ resource.Resource = (*buildResource)(nil)
 var _ resource.ResourceWithConfigure = (*buildResource)(nil)
 var _ resource.ResourceWithValidateConfig = (*buildResource)(nil)
+var _ resource.ResourceWithImportState = (*buildResource)(nil)

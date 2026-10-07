@@ -3,19 +3,21 @@
 page_title: "devcontainerbuilder_build Resource - devcontainerbuilder"
 subcategory: ""
 description: |-
-  Triggers a devcontainer-builder build (clone + devcontainer build + push) via POST /build. Every attribute forces replacement on change - the service has no partial-update API, so any input change means a brand-new build. Read checks the built image still exists in its registry (GET /image); Delete attempts to remove it (DELETE /image), best-effort, since not all registries support deletion.
+  Triggers a devcontainer-builder build (clone + devcontainer build + push) via POST /build. Changing repository, branch or image_spec rebuilds the image (replacement) - the service has no partial-update API. Changing only git_credentials or registry_credentials (e.g. rotating a token) updates them in state in place, without a rebuild. Read checks the built image still exists in its registry (GET /image); Delete attempts to remove it (DELETE /image), best-effort, since not all registries support deletion. Importable by image reference (see the Import section).
 ---
 
 # devcontainerbuilder_build (Resource)
 
-Triggers a devcontainer-builder build (clone + devcontainer build + push) via POST /build. Every attribute forces replacement on change - the service has no partial-update API, so any input change means a brand-new build. Read checks the built image still exists in its registry (GET /image); Delete attempts to remove it (DELETE /image), best-effort, since not all registries support deletion.
+Triggers a devcontainer-builder build (clone + devcontainer build + push) via POST /build. Changing repository, branch or image_spec rebuilds the image (replacement) - the service has no partial-update API. Changing only git_credentials or registry_credentials (e.g. rotating a token) updates them in state in place, without a rebuild. Read checks the built image still exists in its registry (GET /image); Delete attempts to remove it (DELETE /image), best-effort, since not all registries support deletion. Importable by image reference (see the Import section).
 
 ## Example Usage
 
 ```terraform
 resource "devcontainerbuilder_build" "example" {
   repository = "https://github.com/<owner>/<repo>.git"
-  branch     = "main" # optional, defaults to "main"
+  # Optional - unset builds the repository's default branch, and `branch`
+  # then reports which one that was. Changing it rebuilds the image.
+  # branch = "main"
 
   # Optional - any field left unset is derived by the service (name from
   # the repo path, tag from the commit SHA, registry from server-side
@@ -26,14 +28,16 @@ resource "devcontainerbuilder_build" "example" {
   }
 
   # Optional - only needed for a private repository. HTTPS-shaped, same as
-  # the service's own /build gitCredentials.
+  # the service's own /build gitCredentials. Rotating the token updates
+  # state in place; it does not rebuild the image.
   # git_credentials = {
   #   username = "svc-bot"
   #   token    = var.git_token
   # }
 
   # Optional - reused for this resource's later Read/Delete registry calls
-  # too, not just the initial push.
+  # too, not just the initial push. Rotating the password updates state in
+  # place; it does not rebuild the image.
   # registry_credentials = {
   #   registry = "ghcr.io/example"
   #   username = "svc-bot"
@@ -51,14 +55,14 @@ output "image" {
 
 ### Required
 
-- `repository` (String) Git repository URL (https://, ssh://, or SCP-style).
+- `repository` (String) Git repository URL (https://, ssh://, or SCP-style). Changing it rebuilds the image.
 
 ### Optional
 
-- `branch` (String) Branch to build. Defaults to "main".
-- `git_credentials` (Attributes, Sensitive) HTTPS git credentials for a private repository. (see [below for nested schema](#nestedatt--git_credentials))
+- `branch` (String) Branch to build. If unset, the service builds the repository's default branch and this attribute reports the branch it resolved (devcontainer-builder services that don't report one build "main"). Changing it rebuilds the image; so does removing an explicitly set branch, since the default branch may differ. Leaving it unset never rebuilds on its own - a later change of the repository's default branch is not detected.
+- `git_credentials` (Attributes, Sensitive) HTTPS git credentials for a private repository. Changing them (e.g. rotating the token) only updates state - it does not rebuild the image; the new values are used by the next rebuild. (see [below for nested schema](#nestedatt--git_credentials))
 - `image_spec` (Attributes) Target image overrides. Any field left unset is derived by the service (name from the repo path, tag from the commit SHA, registry from server-side mapping rules). (see [below for nested schema](#nestedatt--image_spec))
-- `registry_credentials` (Attributes, Sensitive) Credentials used to push the built image, and reused for the Read/Delete registry calls this resource makes later. (see [below for nested schema](#nestedatt--registry_credentials))
+- `registry_credentials` (Attributes, Sensitive) Credentials used to push the built image, and reused for the Read/Delete registry calls this resource makes later. Changing them (e.g. rotating the password) only updates state - it does not rebuild the image; later Read/Delete calls and the next rebuild use the new values. (see [below for nested schema](#nestedatt--registry_credentials))
 
 ### Read-Only
 
@@ -96,3 +100,34 @@ Required:
 - `password` (String, Sensitive)
 - `registry` (String)
 - `username` (String, Sensitive)
+
+## Import
+
+Import is supported using the following syntax:
+
+In Terraform v1.5.0 and later, the [`import` block](https://developer.hashicorp.com/terraform/language/import) can be used with the `id` attribute, for example:
+
+```terraform
+import {
+  to = devcontainerbuilder_build.example
+  id = "ghcr.io/example/example-devcontainer:sha-abc1234"
+}
+```
+
+The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/commands/import) can be used, for example:
+
+```shell
+# Import an already-pushed image by its reference, <registry>/<name>:<tag>.
+# The reference is split at its last "/", so the registry may be namespaced
+# (ghcr.io/org). For an image name that itself contains "/", use the
+# unambiguous <registry>,<name>,<tag> form instead.
+#
+# Only the image identity comes from the reference. repository, branch and
+# image_spec are adopted from configuration on the next apply, without a
+# rebuild, and are not checked against the image (an unset branch stays
+# empty: which branch the image came from is unknown). git_credentials and
+# registry_credentials can never be imported; that same apply stores them
+# from configuration. The import itself checks the image exists using the
+# service's own (ambient) registry credentials.
+terraform import devcontainerbuilder_build.example ghcr.io/example/example-devcontainer:sha-abc1234
+```

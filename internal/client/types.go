@@ -46,6 +46,10 @@ type BuildResult struct {
 	// Commit is the full SHA the image was built from (service v0.3.0+;
 	// empty from older services).
 	Commit string `json:"commit,omitempty"`
+	// Branch is the branch the service actually built - its remote default
+	// branch when the request named none. Empty from services that don't
+	// report it (they always build the requested branch, or "main").
+	Branch string `json:"branch,omitempty"`
 }
 
 // ImageRef identifies a previously-built image for CheckImage/DeleteImage.
